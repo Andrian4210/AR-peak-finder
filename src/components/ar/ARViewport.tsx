@@ -1,10 +1,17 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useDeviceSensors } from '../../hooks/useDeviceSensors';
 import { useAppStore } from '../../store/appStore';
-import type { DetectedPeak, WorkerRequest, WorkerResponse } from '../../types';
+import { TERRAIN_CANDIDATES } from '../../data/terrainCandidates';
+import { enrichTerrainElevations } from '../../services/elevationService';
+import type {
+    DetectedPeak,
+    WorkerDetectRequest,
+    WorkerInitRequest,
+    WorkerResponse,
+} from '../../types';
 
 // ─────────────────────────────────────────────────────────────
-// ARViewport — Full-screen camera feed with peak overlay labels
+// ARViewport — Full-screen camera feed with peak/hill labels
 // driven by the geospatial Web Worker on a rAF loop.
 // ─────────────────────────────────────────────────────────────
 
@@ -17,14 +24,23 @@ export function ARViewport() {
     const workerRef = useRef<Worker | null>(null);
     const rafRef = useRef<number>(0);
     const busyRef = useRef(false);
+    const locationRef = useRef(useAppStore.getState().location);
+    const attitudeRef = useRef(useAppStore.getState().attitude);
 
     const [peaks, setPeaksLocal] = useState<DetectedPeak[]>([]);
+    const [terrainReady, setTerrainReady] = useState(false);
 
     const location = useAppStore((s) => s.location);
     const attitude = useAppStore((s) => s.attitude);
     const setPeaks = useAppStore((s) => s.setPeaks);
 
-    // ── Instantiate the worker once ────────────────────────
+    useEffect(() => {
+        locationRef.current = location;
+    }, [location]);
+
+    useEffect(() => {
+        attitudeRef.current = attitude;
+    }, [attitude]);
 
     useEffect(() => {
         const worker = new Worker(
@@ -33,6 +49,11 @@ export function ARViewport() {
         );
 
         worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
+            if (e.data.type === 'TERRAIN_READY') {
+                setTerrainReady(true);
+                return;
+            }
+
             busyRef.current = false;
             if (e.data.type === 'PEAKS_DETECTED') {
                 setPeaksLocal(e.data.peaks);
@@ -42,37 +63,51 @@ export function ARViewport() {
 
         workerRef.current = worker;
 
+        void (async () => {
+            const terrain = await enrichTerrainElevations(TERRAIN_CANDIDATES);
+            const initMsg: WorkerInitRequest = {
+                type: 'INIT_TERRAIN',
+                terrain,
+            };
+            worker.postMessage(initMsg);
+        })();
+
         return () => {
             worker.terminate();
             workerRef.current = null;
         };
     }, [setPeaks]);
 
-    // ── rAF loop: send sensor data to worker each frame ────
-
-    const tick = useCallback(() => {
-        // Only post if the worker has finished the previous frame
-        if (workerRef.current && location && attitude && !busyRef.current) {
-            busyRef.current = true;
-            const msg: WorkerRequest = {
-                type: 'DETECT_PEAKS',
-                location,
-                attitude,
-                fovDeg: CAMERA_FOV_H,
-                viewportWidth: window.innerWidth,
-                viewportHeight: window.innerHeight,
-            };
-            workerRef.current.postMessage(msg);
-        }
-        rafRef.current = requestAnimationFrame(tick);
-    }, [location, attitude]);
-
     useEffect(() => {
-        rafRef.current = requestAnimationFrame(tick);
-        return () => cancelAnimationFrame(rafRef.current);
-    }, [tick]);
+        const frame = () => {
+            const liveLocation = locationRef.current;
+            const liveAttitude = attitudeRef.current;
 
-    // ── Render ─────────────────────────────────────────────
+            if (
+                workerRef.current &&
+                terrainReady &&
+                liveLocation &&
+                liveAttitude &&
+                !busyRef.current
+            ) {
+                busyRef.current = true;
+                const msg: WorkerDetectRequest = {
+                    type: 'DETECT_PEAKS',
+                    location: liveLocation,
+                    attitude: liveAttitude,
+                    fovDeg: CAMERA_FOV_H,
+                    viewportWidth: window.innerWidth,
+                    viewportHeight: window.innerHeight,
+                };
+                workerRef.current.postMessage(msg);
+            }
+
+            rafRef.current = requestAnimationFrame(frame);
+        };
+
+        rafRef.current = requestAnimationFrame(frame);
+        return () => cancelAnimationFrame(rafRef.current);
+    }, [terrainReady]);
 
     if (error) {
         return (
@@ -84,7 +119,6 @@ export function ARViewport() {
 
     return (
         <div className="ar-viewport">
-            {/* Camera feed */}
             <video
                 ref={videoRef}
                 autoPlay
@@ -93,7 +127,6 @@ export function ARViewport() {
                 className="ar-viewport__video"
             />
 
-            {/* AR overlay (peak labels) */}
             <div className="ar-viewport__overlay">
                 {peaks.map((peak) => (
                     <div
@@ -107,7 +140,8 @@ export function ARViewport() {
                         <div className="peak-label__pip" />
                         <span className="peak-label__name">{peak.name}</span>
                         <span className="peak-label__meta">
-                            {peak.distanceKm.toFixed(1)} km · {peak.elevationM} m
+                            {peak.type.toUpperCase()} · {peak.distanceKm.toFixed(1)} km ·{' '}
+                            {peak.elevationM} m
                         </span>
                     </div>
                 ))}

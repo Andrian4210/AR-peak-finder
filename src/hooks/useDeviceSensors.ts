@@ -19,15 +19,15 @@ export interface DeviceSensorsResult {
 
 export function useDeviceSensors(): DeviceSensorsResult {
     const videoRef = useRef<HTMLVideoElement | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(() =>
+        'geolocation' in navigator ? null : 'Geolocation API not available',
+    );
     const [orientationPermission, setOrientationPermission] = useState<
         'prompt' | 'granted' | 'denied' | 'not-required'
     >('prompt');
 
     const setLocation = useAppStore((s) => s.setLocation);
     const setAttitude = useAppStore((s) => s.setAttitude);
-
-    // ── Camera ─────────────────────────────────────────────
 
     const streamRef = useRef<MediaStream | null>(null);
 
@@ -71,11 +71,8 @@ export function useDeviceSensors(): DeviceSensorsResult {
         };
     }, []);
 
-    // ── GPS ────────────────────────────────────────────────
-
     useEffect(() => {
         if (!('geolocation' in navigator)) {
-            setError('Geolocation API not available');
             return;
         }
 
@@ -102,13 +99,8 @@ export function useDeviceSensors(): DeviceSensorsResult {
         return () => navigator.geolocation.clearWatch(watchId);
     }, [setLocation]);
 
-    // ── Device orientation ─────────────────────────────────
-
     const handleOrientation = useCallback(
         (event: DeviceOrientationEvent) => {
-            // iOS Safari provides webkitCompassHeading (True North, 0-360).
-            // Android provides alpha (0-360, but may be relative — not absolute
-            // unless event.absolute === true).
             const iOSEvent = event as DeviceOrientationEvent & {
                 webkitCompassHeading?: number;
             };
@@ -118,12 +110,8 @@ export function useDeviceSensors(): DeviceSensorsResult {
                 iOSEvent.webkitCompassHeading !== undefined &&
                 iOSEvent.webkitCompassHeading !== null
             ) {
-                // iOS True North — already 0-360, clockwise
                 heading = iOSEvent.webkitCompassHeading;
             } else if (event.alpha !== null) {
-                // Android: alpha is counter-clockwise from an arbitrary reference.
-                // When event.absolute === true, alpha 0 = North, but it runs
-                // counter-clockwise, so heading = (360 - alpha) % 360.
                 heading = ((360 - event.alpha) % 360 + 360) % 360;
             } else {
                 heading = 0;
@@ -131,8 +119,6 @@ export function useDeviceSensors(): DeviceSensorsResult {
 
             const attitude: DeviceAttitude = {
                 absoluteHeading: heading,
-                // beta = device tilt: 0 = flat, 90 = upright (looking at horizon).
-                // Convert to look-angle: 90 - beta, so upright → 0° (horizon).
                 pitch: 90 - (event.beta ?? 90),
                 roll: event.gamma ?? 0,
             };
@@ -143,16 +129,12 @@ export function useDeviceSensors(): DeviceSensorsResult {
     );
 
     useEffect(() => {
-        // Check if the iOS permission dance is needed
         const DOE = DeviceOrientationEvent as unknown as {
             requestPermission?: () => Promise<'granted' | 'denied'>;
         };
 
         async function initOrientation() {
             if (typeof DOE.requestPermission === 'function') {
-                // iOS 13+ — must be triggered by a user gesture.
-                // This hook is only mounted after the "Start" button, so
-                // we're inside a user-gesture call stack.
                 try {
                     const result = await DOE.requestPermission();
                     setOrientationPermission(result);
@@ -172,7 +154,7 @@ export function useDeviceSensors(): DeviceSensorsResult {
             window.addEventListener('deviceorientation', handleOrientation, true);
         }
 
-        initOrientation();
+        void initOrientation();
 
         return () => {
             window.removeEventListener('deviceorientation', handleOrientation, true);

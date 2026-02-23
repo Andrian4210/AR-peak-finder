@@ -103,18 +103,32 @@ export interface ScreenPosition {
     inFov: boolean;
 }
 
+function applyCameraWarp(
+    x: number,
+    y: number,
+    screenW: number,
+    screenH: number,
+    k1 = 0,
+): { x: number; y: number } {
+    if (k1 === 0) return { x, y };
+
+    const cx = screenW * 0.5;
+    const cy = screenH * 0.5;
+    const nx = (x - cx) / cx;
+    const ny = (y - cy) / cy;
+
+    const r2 = nx * nx + ny * ny;
+    const factor = 1 + k1 * r2;
+
+    return {
+        x: cx + nx * factor * cx,
+        y: cy + ny * factor * cy,
+    };
+}
+
 /**
  * Project a peak's world-space bearing/pitch into screen-space
  * pixel coordinates.
- *
- * @param peakBearing    Bearing of the peak in degrees (0-360).
- * @param peakPitch      Pitch to the peak in degrees.
- * @param deviceHeading  Current compass heading of the device (0-360).
- * @param devicePitch    Current pitch of the device in degrees.
- * @param fovH           Horizontal field-of-view in degrees.
- * @param fovV           Vertical field-of-view in degrees.
- * @param screenW        Viewport width in CSS pixels.
- * @param screenH        Viewport height in CSS pixels.
  */
 export function calculateScreenPosition(
     peakBearing: number,
@@ -125,29 +139,25 @@ export function calculateScreenPosition(
     fovV: number,
     screenW: number,
     screenH: number,
+    cameraWarpK1 = 0,
 ): ScreenPosition {
-    // ── Horizontal delta (handles 359→0 wrap) ────────────
     let dBearing = peakBearing - deviceHeading;
-    // Normalise to −180 … +180
     if (dBearing > 180) dBearing -= 360;
     if (dBearing < -180) dBearing += 360;
 
-    // ── Vertical delta ───────────────────────────────────
     const dPitch = peakPitch - devicePitch;
 
-    // ── Map angular deltas to pixel space ────────────────
     const halfFovH = fovH * 0.5;
     const halfFovV = fovV * 0.5;
 
-    // x: centre of screen = heading match, right = positive bearing delta
     const x = (dBearing / halfFovH) * (screenW * 0.5) + screenW * 0.5;
-    // y: centre = pitch match, up = positive pitch (inverted in screen coords)
     const y = -(dPitch / halfFovV) * (screenH * 0.5) + screenH * 0.5;
 
-    // In FOV if both axes fall within the viewport (with a small gutter)
-    const inFov =
-        x >= -40 && x <= screenW + 40 &&
-        y >= -40 && y <= screenH + 40;
+    const warped = applyCameraWarp(x, y, screenW, screenH, cameraWarpK1);
 
-    return { x, y, inFov };
+    const inFov =
+        warped.x >= -40 && warped.x <= screenW + 40 &&
+        warped.y >= -40 && warped.y <= screenH + 40;
+
+    return { x: warped.x, y: warped.y, inFov };
 }

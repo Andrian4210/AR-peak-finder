@@ -1,15 +1,12 @@
 // ─────────────────────────────────────────────────────────────
 // Geospatial Web Worker — full pipeline
 // ─────────────────────────────────────────────────────────────
-// Receives WorkerRequest (user location + attitude + viewport),
-// computes distance/bearing/pitch/screen-position for each peak,
-// filters to FOV, and returns DetectedPeak[].
-// ─────────────────────────────────────────────────────────────
 
 import type {
     WorkerRequest,
     WorkerResponse,
     DetectedPeak,
+    TerrainCandidate,
 } from '../types';
 
 import {
@@ -19,94 +16,43 @@ import {
     calculateScreenPosition,
 } from '../utils/geoMath';
 
-// ── Mock peak dataset (SE Queensland summits) ──────────────
-// In production this would come from a GeoJSON/DEM tile set.
-
-interface PeakRecord {
-    id: string;
-    name: string;
-    lat: number;
-    lon: number;
-    elevationM: number;
-}
-
-const PEAK_DATABASE: PeakRecord[] = [
-    {
-        id: 'mt-warning',
-        name: 'Mt Warning',
-        lat: -28.3976,
-        lon: 153.2709,
-        elevationM: 1156,
-    },
-    {
-        id: 'mt-tamborine',
-        name: 'Mt Tamborine',
-        lat: -27.9389,
-        lon: 153.1717,
-        elevationM: 525,
-    },
-    {
-        id: 'flinders-peak',
-        name: 'Flinders Peak',
-        lat: -27.8203,
-        lon: 152.8081,
-        elevationM: 680,
-    },
-    {
-        id: 'mt-barney',
-        name: 'Mt Barney',
-        lat: -28.2893,
-        lon: 152.6964,
-        elevationM: 1359,
-    },
-    {
-        id: 'springbrook',
-        name: 'Springbrook Plateau',
-        lat: -28.2113,
-        lon: 153.2747,
-        elevationM: 900,
-    },
-];
-
-// ── Worker message handler ─────────────────────────────────
+let terrainDB: TerrainCandidate[] = [];
+const CAMERA_WARP_K1 = 0.08;
 
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {
-    const { type, location, attitude, fovDeg, viewportWidth, viewportHeight } =
-        event.data;
+    const data = event.data;
 
-    if (type !== 'DETECT_PEAKS') return;
+    if (data.type === 'INIT_TERRAIN') {
+        terrainDB = data.terrain;
+        const response: WorkerResponse = {
+            type: 'TERRAIN_READY',
+            count: terrainDB.length,
+        };
+        self.postMessage(response);
+        return;
+    }
 
+    if (data.type !== 'DETECT_PEAKS') return;
+
+    const { location, attitude, fovDeg, viewportWidth, viewportHeight } = data;
     const start = performance.now();
-
     const userAlt = location.altitude ?? 0;
 
-    // Derive vertical FOV from horizontal FOV + aspect ratio
     const aspect = viewportWidth / (viewportHeight || 1);
     const fovV = fovDeg / aspect;
 
     const peaks: DetectedPeak[] = [];
 
-    for (let i = 0; i < PEAK_DATABASE.length; i++) {
-        const pk = PEAK_DATABASE[i];
+    for (let i = 0; i < terrainDB.length; i++) {
+        const target = terrainDB[i];
+        const targetAlt = target.elevationM ?? 0;
 
-        // Distance in metres
-        const distM = calculateDistance(location.lat, location.lon, pk.lat, pk.lon);
+        const distM = calculateDistance(location.lat, location.lon, target.lat, target.lon);
+        if (distM > 120_000) continue;
 
-        // Skip peaks beyond 100 km (not practically visible)
-        if (distM > 100_000) continue;
+        const bearing = calculateBearing(location.lat, location.lon, target.lat, target.lon);
+        const pitch = calculatePitch(userAlt, targetAlt, distM);
 
-        // Bearing from user to peak (0-360)
-        const bearing = calculateBearing(
-            location.lat,
-            location.lon,
-            pk.lat,
-            pk.lon,
-        );
-
-        // Curvature-corrected pitch angle
-        const pitch = calculatePitch(userAlt, pk.elevationM, distM);
-
-        // Project to screen coordinates
         const screen = calculateScreenPosition(
             bearing,
             pitch,
@@ -116,16 +62,19 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
             fovV,
             viewportWidth,
             viewportHeight,
+            CAMERA_WARP_K1,
         );
 
-        // Confidence: closer + higher = more confident
-        const confidence = Math.max(0, Math.min(1, 1 - distM / 100_000));
+        const distanceScore = Math.max(0, Math.min(1, 1 - distM / 120_000));
+        const prominenceScore = Math.max(0, Math.min(1, targetAlt / 1500));
+        const confidence = distanceScore * 0.75 + prominenceScore * 0.25;
 
         peaks.push({
-            id: pk.id,
-            name: pk.name,
+            id: target.id,
+            name: target.name,
+            type: target.type,
             distanceKm: distM / 1000,
-            elevationM: pk.elevationM,
+            elevationM: targetAlt,
             confidence,
             screenX: screen.x,
             screenY: screen.y,
@@ -133,8 +82,10 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
         });
     }
 
-    // Only send peaks within (or near) the viewport
-    const visiblePeaks = peaks.filter((p) => p.inFov);
+    const visiblePeaks = peaks
+        .filter((p) => p.inFov)
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, 12);
 
     const response: WorkerResponse = {
         type: 'PEAKS_DETECTED',
