@@ -27,12 +27,28 @@ export interface DeviceAttitude {
   roll: number;
 }
 
-/** A mountain peak detected in the user's field of view. */
-export interface DetectedPeak {
-  /** Stable identifier for this peak (e.g. from the dataset). */
+/** Terrain category supported by the recogniser. */
+export type TerrainFeatureType = 'peak' | 'hill';
+
+/** Input terrain target record used by the worker. */
+export interface TerrainCandidate {
   id: string;
-  /** Human-readable name of the peak. */
   name: string;
+  type: TerrainFeatureType;
+  lat: number;
+  lon: number;
+  /** Summit/top elevation in metres (nullable until fetched from DEM API). */
+  elevationM: number | null;
+}
+
+/** A mountain or hill detected in the user's field of view. */
+export interface DetectedPeak {
+  /** Stable identifier for this terrain feature. */
+  id: string;
+  /** Human-readable name of the feature. */
+  name: string;
+  /** Whether this is a peak or hill. */
+  type: TerrainFeatureType;
   /** Distance from the user in kilometres. */
   distanceKm: number;
   /** Summit elevation in metres above sea level. */
@@ -43,7 +59,7 @@ export interface DetectedPeak {
   screenX: number;
   /** Vertical screen position in CSS pixels (top edge = 0). */
   screenY: number;
-  /** Whether this peak is currently within the camera's field of view. */
+  /** Whether this feature is currently within the camera's field of view. */
   inFov: boolean;
 }
 
@@ -51,8 +67,14 @@ export interface DetectedPeak {
 // Worker message protocol
 // ─────────────────────────────────────────────────────────────
 
-/** Payload sent TO the geospatial worker. */
-export interface WorkerRequest {
+/** Payload sent TO the geospatial worker to initialise terrain DB. */
+export interface WorkerInitRequest {
+  type: 'INIT_TERRAIN';
+  terrain: TerrainCandidate[];
+}
+
+/** Payload sent TO the geospatial worker for each render frame. */
+export interface WorkerDetectRequest {
   type: 'DETECT_PEAKS';
   location: UserLocation;
   attitude: DeviceAttitude;
@@ -64,10 +86,20 @@ export interface WorkerRequest {
   viewportHeight: number;
 }
 
-/** Payload received FROM the geospatial worker. */
-export interface WorkerResponse {
+export type WorkerRequest = WorkerInitRequest | WorkerDetectRequest;
+
+/** Worker emits after terrain catalogue is loaded. */
+export interface WorkerTerrainReadyResponse {
+  type: 'TERRAIN_READY';
+  count: number;
+}
+
+/** Payload received FROM worker after a detect frame. */
+export interface WorkerPeaksDetectedResponse {
   type: 'PEAKS_DETECTED';
   peaks: DetectedPeak[];
   /** Processing time in milliseconds (for performance telemetry). */
   computeMs: number;
 }
+
+export type WorkerResponse = WorkerTerrainReadyResponse | WorkerPeaksDetectedResponse;
